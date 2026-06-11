@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from qcodes.instrument import (
@@ -98,19 +99,61 @@ class MiniCircuitsSPDTBase(Instrument):
         for c in self.channels:
             c.switch(switch_to)
 
-    def get_number_of_channels(self) -> int:
-        model = self.get_idn()["model"]
-        if model is None:
-            raise RuntimeError(
-                "The driver could not get model information for the device, "
-                "it might not be supported."
+    def get_number_of_channels(
+        self, max_attempts: int = 3, retry_delay: float = 1.0
+    ) -> int:
+        """
+        Determine the number of channels from the model name returned by
+        ``get_idn``.
+
+        The first communication with the device after connecting sometimes
+        returns an empty or incomplete model name. To be robust against this,
+        ``get_idn`` is queried up to ``max_attempts`` times until a model name
+        that the number of channels can be parsed from is returned.
+
+        Args:
+            max_attempts: Number of times to query ``get_idn`` while trying to
+                obtain a parseable model name.
+            retry_delay: Time in seconds to wait between failed attempts.
+
+        Raises:
+            RuntimeError: If a parseable model name could not be obtained after
+                ``max_attempts`` attempts.
+
+        """
+        model = None
+        for attempt in range(max_attempts):
+            model = self.get_idn()["model"]
+            number_of_channels = self._parse_number_of_channels(model)
+            if number_of_channels is not None:
+                return number_of_channels
+            log.warning(
+                "The driver could not determine the number of channels of the "
+                "model '%s' on attempt %d of %d.",
+                model,
+                attempt + 1,
+                max_attempts,
             )
+            if attempt < max_attempts - 1:
+                time.sleep(retry_delay)
+        raise RuntimeError(
+            "The driver could not determine the number of channels of the "
+            f"model '{model}' after {max_attempts} attempts, "
+            "it might not be supported."
+        )
+
+    def _parse_number_of_channels(self, model: str | None) -> int | None:
+        """
+        Parse the number of channels from a model name.
+
+        Returns ``None`` if the model name is missing or does not contain a
+        parseable number of channels.
+        """
+        if not model:
+            return None
         model_parts = model.split("-")
         if len(model_parts) < 2:
-            raise RuntimeError(
-                "The driver could not determine the number of channels of "
-                f"the model '{model}', it might not be supported"
-            )
+            return None
         if model_parts[0] not in ("RC", "USB"):
             log.warning(
                 f"The model with the name '{model}' might not be supported by"
@@ -118,14 +161,8 @@ class MiniCircuitsSPDTBase(Instrument):
             )
         match = re.match("^[0-9]*", model_parts[1])
         if match is None:
-            raise RuntimeError(
-                "The driver could not determine the number of channels of"
-                f" the model '{model}', it might not be supported"
-            )
+            return None
         channels = match[0]
         if not channels:
-            raise RuntimeError(
-                "The driver could not determine the number of channels of"
-                f" the model '{model}', it might not be supported"
-            )
+            return None
         return int(channels)
